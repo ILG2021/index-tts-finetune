@@ -22,7 +22,7 @@ This model card accompanies the Vietnamese adaptation of **IndexTTS2**. It expos
 Install dependencies and load the repo checkpoint. The snippet below assumes the weights/config live under `checkpoints/` inside this repo or your Hugging Face space.
 
 ```bash
-pip install -U torch torchaudio soundfile sentencepiece modelscope huggingface_hub
+pip install -U torch torchaudio soundfile sentencepiece huggingface_hub
 ```
 
 ```python
