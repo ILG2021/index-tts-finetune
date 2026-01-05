@@ -378,7 +378,8 @@ def process_batch(
         for future, item in futures.items():
             try:
                 waveform, sr = future.result()
-            except Exception:
+            except Exception as e:
+                print(e)
                 skipped += 1
                 continue
             item["waveform"] = waveform
@@ -388,7 +389,8 @@ def process_batch(
         for item in candidates:
             try:
                 waveform, sr = load_audio(item["audio_path"], target_sr=24000)
-            except Exception:
+            except Exception as e:
+                print(e)
                 skipped += 1
                 continue
             item["waveform"] = waveform

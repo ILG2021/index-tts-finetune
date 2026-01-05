@@ -126,6 +126,11 @@ python tools/preprocess_multiproc.py \
   --hf-cache-dir runs/vi/hf_cache
 ```
 
+if vram oom, you could reduce batch size as:
+```bash
+--device cuda --batch-size 2 --workers 1 --num-processes 1 \
+```
+
 4. **Create GPT prompt/target pairs**
 
 ```bash

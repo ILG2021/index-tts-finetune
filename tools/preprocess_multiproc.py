@@ -134,7 +134,8 @@ def move_feature_tree(source_dir: Path, dest_dir: Path) -> None:
             target_path = dst_sub / path.name
             if target_path.exists():
                 # Already present; assume prior run completed this sample.
-                path.unlink()
+                # path.unlink()
+                pass
             else:
                 shutil.move(str(path), str(target_path))
 
