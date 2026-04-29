@@ -23,12 +23,13 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--verbose", action="store_true", default=False, help="Enable verbose mode")
 parser.add_argument("--port", type=int, default=7860, help="Port to run the web UI on")
-parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the web UI on")
+parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to run the web UI on")
 parser.add_argument("--model_dir", type=str, default="./checkpoints", help="Model checkpoints directory")
 parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16 for inference if available")
 parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
 parser.add_argument("--cuda_kernel", action="store_true", default=False, help="Use CUDA kernel for inference if available")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
+parser.add_argument("--root_path", type=str, default=None, help="Root path for the web UI (useful for reverse proxies)")
 cmd_args = parser.parse_args()
 
 if not os.path.exists(cmd_args.model_dir):
@@ -48,10 +49,11 @@ for file in [
         sys.exit(1)
 
 import gradio as gr
+import audio_match_v2
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
 
-i18n = I18nAuto(language="Auto")
+i18n = I18nAuto(language="zh_CN")
 MODE = 'local'
 tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
@@ -68,7 +70,7 @@ EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
                 i18n("使用情感参考音频"),
                 i18n("使用情感向量控制"),
                 i18n("使用情感描述文本控制")]
-EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL[:-1]  # skip experimental features
+EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL  # skip experimental features
 
 os.makedirs("outputs/tasks",exist_ok=True)
 os.makedirs("prompts",exist_ok=True)
@@ -112,7 +114,7 @@ def get_example_cases(include_experimental = False):
 def gen_single(emo_control_method,prompt, text,
                emo_ref_path, emo_weight,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-               emo_text,emo_random,
+               emo_text,emo_random, speed_factor,
                max_text_tokens_per_segment=120,
                 *args, progress=gr.Progress()):
     output_path = None
@@ -157,10 +159,25 @@ def gen_single(emo_control_method,prompt, text,
                        emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
                        emo_vector=vec,
                        use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
-                       verbose=cmd_args.verbose,
+                       verbose=cmd_args.verbose, speed_factor=float(speed_factor),
                        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
                        **kwargs)
     return gr.update(value=output,visible=True)
+
+def audio_match_wrapper(ref_path, target_path, eq_strength, do_reverb, do_noise):
+    if ref_path is None or target_path is None:
+        return None
+    os.makedirs("outputs", exist_ok=True)
+    output_path = os.path.join("outputs", f"matched_{int(time.time())}.wav")
+    audio_match_v2.match_audio(
+        ref_path=ref_path,
+        target_path=target_path,
+        output_path=output_path,
+        eq_strength=eq_strength,
+        do_reverb=do_reverb,
+        do_noise=do_noise
+    )
+    return output_path
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
@@ -174,12 +191,6 @@ def create_experimental_warning_message():
 
 with gr.Blocks(title="IndexTTS Demo") as demo:
     mutex = threading.Lock()
-    gr.HTML('''
-    <h2><center>IndexTTS2: A Breakthrough in Emotionally Expressive and Duration-Controlled Auto-Regressive Zero-Shot Text-to-Speech</h2>
-<p align="center">
-<a href='https://arxiv.org/abs/2506.21619'><img src='https://img.shields.io/badge/ArXiv-2506.21619-red'></a>
-</p>
-    ''')
 
     with gr.Tab(i18n("音频生成")):
         with gr.Row():
@@ -195,7 +206,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True)
             output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio")
 
-        experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
+        experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=True, visible=False)
 
         with gr.Accordion(i18n("功能设置")):
             # 情感控制选项部分
@@ -245,6 +256,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
         with gr.Row(visible=False) as emo_weight_group:
             emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
+
+        with gr.Row():
+            speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
 
         with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
@@ -301,6 +315,26 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         emo_weight,
                         emo_text,
                         vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+        )
+
+    with gr.Tab(i18n("声场匹配")):
+        gr.Markdown(i18n("将目标音频（B）的声场特征（EQ、混响、噪声底）匹配到参考音频（A）。常用于使 TTS 语音听起来更像是在特定环境下录制的。"))
+        with gr.Row():
+            with gr.Column():
+                match_ref_audio = gr.Audio(label=i18n("参考音频 (A)"), type="filepath")
+                match_tgt_audio = gr.Audio(label=i18n("目标音频 (B)"), type="filepath")
+                with gr.Row():
+                    match_eq_strength = gr.Slider(label=i18n("EQ 匹配强度"), minimum=0.0, maximum=1.0, value=0.8, step=0.05)
+                    match_do_reverb = gr.Checkbox(label=i18n("开启混响匹配"), value=True)
+                    match_do_noise = gr.Checkbox(label=i18n("开启噪声底匹配"), value=True)
+                match_btn = gr.Button(i18n("开始匹配"), variant="primary")
+            with gr.Column():
+                match_output_audio = gr.Audio(label=i18n("匹配结果"), interactive=False)
+
+        match_btn.click(
+            audio_match_wrapper,
+            inputs=[match_ref_audio, match_tgt_audio, match_eq_strength, match_do_reverb, match_do_noise],
+            outputs=[match_output_audio]
         )
 
     def on_example_click(example):
@@ -429,7 +463,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     gen_button.click(gen_single,
                      inputs=[emo_control_method,prompt_audio, input_text_single, emo_upload, emo_weight,
                             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-                             emo_text,emo_random,
+                             emo_text,emo_random, speed_factor,
                              max_text_tokens_per_segment,
                              *advanced_params,
                      ],
@@ -439,4 +473,4 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
 if __name__ == "__main__":
     demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port, root_path=cmd_args.root_path)

@@ -74,7 +74,10 @@ import torch
 print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu only')
 PY
 ```
-
+5. **Download pretrain**
+```bash
+hf download IndexTeam/IndexTTS-2 --local-dir=checkpoints
+```
 ---
 
 ## 3. Preparing Data

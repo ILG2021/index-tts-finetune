@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from indextts.gpt.model_v2 import UnifiedVoice
 from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
 from indextts.utils.checkpoint import load_checkpoint
-from indextts.utils.front import TextTokenizer
+from indextts.utils.front import TextTokenizer, TextNormalizer
 from indextts.utils.audio_io import save_audio
 
 from indextts.s2mel.modules.commons import load_checkpoint2, MyModel
@@ -238,7 +238,9 @@ class IndexTTS2:
         print(">> bigvgan weights restored from:", bigvgan_name)
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
-        self.tokenizer = TextTokenizer(self.bpe_path, normalizer=None)
+        # 使用带有中文偏好的 normalizer，确保中文标点（。，！？）被转换为 ASCII 等价符号
+        self.text_normalizer = TextNormalizer(preferred_language="zh")
+        self.tokenizer = TextTokenizer(self.bpe_path, normalizer=self.text_normalizer)
         print(">> bpe model loaded from:", self.bpe_path)
 
         emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
@@ -416,12 +418,16 @@ class IndexTTS2:
         return emo_vector
 
     # 原始推理模式
-    PUNCT_ALLOW = set(".?,")
+    PUNCT_ALLOW = set(".?,!?…-")
 
     def _normalize_text(self, text: str) -> str:
         if self.use_vi_cleaner and ViCleaner is not None:
             cleaner = ViCleaner(text)
             text = cleaner.clean()
+        # 先用 normalizer 将中文标点转换为 ASCII 等价符号
+        # 例如：。→ .  ，→ ,  ！→ !  ？→ ?  ……→ …
+        if hasattr(self, 'text_normalizer') and self.text_normalizer is not None:
+            text = self.text_normalizer.normalize(text)
         filtered = []
         for ch in text:
             if ch.isalnum() or ch.isspace() or ch in self.PUNCT_ALLOW:
@@ -524,7 +530,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, speed_factor=1.0, **generation_kwargs):
         text = self._normalize_text(text).strip()
         sentences = self._split_text_into_sentences(text)
 
@@ -535,7 +541,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
                 )
             try:
                 return list(self.infer_generator(
@@ -543,7 +549,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -555,7 +561,7 @@ class IndexTTS2:
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
             ))
             if result:
                 outputs.append(result[0])
@@ -576,7 +582,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, speed_factor=1.0, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -838,7 +844,7 @@ class IndexTTS2:
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
                     S_infer = S_infer + latent
-                    target_lengths = (code_lens * 1.72).long()
+                    target_lengths = (code_lens * (1.72 / speed_factor)).long()
 
                     cond = self.s2mel.models['length_regulator'](S_infer,
                                                                  ylens=target_lengths,
