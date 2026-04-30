@@ -57,9 +57,11 @@ i18n = I18nAuto(language="zh_CN")
 MODE = 'local'
 tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
-                use_fp16=cmd_args.fp16,
+                use_fp16=True,  # Forced to True for extreme speed and low VRAM
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
+                use_torch_compile=True,  # Enable torch.compile for extreme speed
+                use_accel=True,  # Enable Accel inference engine for GPT
                 )
 # 支持的语言列表
 LANGUAGES = {
@@ -179,9 +181,66 @@ def audio_match_wrapper(ref_path, target_path, eq_strength, do_reverb, do_noise)
     )
     return output_path
 
-def update_prompt_audio():
+def update_prompt_audio(audio_path):
     update_button = gr.update(interactive=True)
-    return update_button
+    text_result = None
+    if audio_path is not None:
+        try:
+            import sherpa_onnx
+            from huggingface_hub import snapshot_download
+            import librosa
+            import glob
+            
+            asr_base_dir = "models-asr"
+            model_dir = None
+            model_file = None
+            tokens_file = None
+            
+            # Scan models-asr for any custom model containing tokens.txt and *.onnx
+            if os.path.exists(asr_base_dir):
+                for subdir in os.listdir(asr_base_dir):
+                    subdir_path = os.path.join(asr_base_dir, subdir)
+                    if os.path.isdir(subdir_path):
+                        t_file = os.path.join(subdir_path, "tokens.txt")
+                        onnx_files = glob.glob(os.path.join(subdir_path, "*.onnx"))
+                        if os.path.exists(t_file) and len(onnx_files) > 0:
+                            model_dir = subdir_path
+                            tokens_file = t_file
+                            # Prioritize non-int8 model if multiple exist, else just pick the first
+                            model_file = next((f for f in onnx_files if "int8" not in f), onnx_files[0])
+                            print(f"Found custom ASR model in {model_dir}, using {os.path.basename(model_file)}")
+                            break
+            
+            # Fallback to default if no valid custom model found
+            if model_dir is None:
+                model_dir = os.path.join(asr_base_dir, "sherpa-onnx-paraformer-zh-2023-09-14")
+                model_file = os.path.join(model_dir, "model.int8.onnx")
+                tokens_file = os.path.join(model_dir, "tokens.txt")
+                if not os.path.exists(model_file) or not os.path.exists(tokens_file):
+                    print(f"Downloading ASR model to {model_dir}...")
+                    snapshot_download(repo_id="csukuangfj/sherpa-onnx-paraformer-zh-2023-09-14", local_dir=model_dir)
+
+            recognizer = sherpa_onnx.OfflineRecognizer.from_paraformer(
+                paraformer=model_file,
+                tokens=tokens_file,
+                num_threads=1,
+                sample_rate=16000,
+                feature_dim=80,
+                decoding_method="greedy_search",
+            )
+            
+            audio, sample_rate = librosa.load(audio_path, sr=16000, mono=True)
+            stream = recognizer.create_stream()
+            stream.accept_waveform(16000, audio)
+            recognizer.decode_stream(stream)
+            text_result = stream.result.text
+            print(f"ASR result: {text_result}")
+        except Exception as e:
+            print(f"ASR Error: {e}")
+
+    if text_result:
+        return update_button, gr.update(value=text_result)
+    return update_button, gr.update()
 
 def create_warning_message(warning_text):
     return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
@@ -457,8 +516,12 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     )
 
     prompt_audio.upload(update_prompt_audio,
-                         inputs=[],
-                         outputs=[gen_button])
+                         inputs=[prompt_audio],
+                         outputs=[gen_button, input_text_single])
+    
+    prompt_audio.change(update_prompt_audio,
+                         inputs=[prompt_audio],
+                         outputs=[gen_button, input_text_single])
 
     gen_button.click(gen_single,
                      inputs=[emo_control_method,prompt_audio, input_text_single, emo_upload, emo_weight,
