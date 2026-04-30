@@ -410,6 +410,8 @@ python tools/preprocess_multiproc.py \
   --hf-cache-dir runs/hf_cache
 
 # Step 3: 生成 GPT Pair（在 tools/ 目录执行）
+# 自动从 checkpoints/config.yaml 读取 max_mel_tokens / max_text_tokens，
+# 过滤超出位置编码表范围的样本，无需手动指定数字。
 cd tools
 python generate_gpt_pairs.py \
   --dataset ../runs/zh_audiobook/processed --pairs-per-target 3 --force
