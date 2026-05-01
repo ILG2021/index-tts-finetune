@@ -15,14 +15,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
-
-try:
-    from omegaconf import OmegaConf
-    _USE_OMEGACONF = True
-except ImportError:  # fall back to plain yaml
-    import yaml as _yaml
-    _USE_OMEGACONF = False
+from typing import Iterable, List, Optional, Sequence
 
 from build_gpt_prompt_pairs import (
     Sample,
@@ -30,25 +23,6 @@ from build_gpt_prompt_pairs import (
     group_by_speaker,
     read_manifest,
 )
-
-
-def _load_gpt_limits(config_path: Path) -> Dict[str, int]:
-    """Return {'max_mel_tokens': ..., 'max_text_tokens': ...} from a config YAML."""
-    if _USE_OMEGACONF:
-        cfg = OmegaConf.load(config_path)
-        gpt = cfg.get("gpt", {})
-        return {
-            "max_mel_tokens": int(OmegaConf.select(cfg, "gpt.max_mel_tokens") or 0),
-            "max_text_tokens": int(OmegaConf.select(cfg, "gpt.max_text_tokens") or 0),
-        }
-    else:
-        with config_path.open("r", encoding="utf-8") as fh:
-            cfg = _yaml.safe_load(fh)
-        gpt = cfg.get("gpt", {}) if cfg else {}
-        return {
-            "max_mel_tokens": int(gpt.get("max_mel_tokens", 0)),
-            "max_text_tokens": int(gpt.get("max_text_tokens", 0)),
-        }
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,28 +85,6 @@ def parse_args() -> argparse.Namespace:
         help="Skip targets with semantic code length below this threshold.",
     )
     parser.add_argument(
-        "--max-text-len",
-        type=int,
-        default=0,
-        help="Skip targets whose text length exceeds this value. "
-             "0 = read from --config (gpt.max_text_tokens); -1 = no limit.",
-    )
-    parser.add_argument(
-        "--max-code-len",
-        type=int,
-        default=0,
-        help="Skip targets whose semantic code length exceeds this value. "
-             "0 = read from --config (gpt.max_mel_tokens); -1 = no limit.",
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=Path("checkpoints/config.yaml"),
-        help="Path to the IndexTTS config YAML (default: checkpoints/config.yaml). "
-             "gpt.max_mel_tokens / gpt.max_text_tokens are used as upper-bound defaults "
-             "for --max-code-len / --max-text-len unless those flags are set explicitly.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=2025,
@@ -167,8 +119,6 @@ def generate_for_manifest(
     pairs_per_target: int,
     min_text_len: int,
     min_code_len: int,
-    max_text_len: int = 0,
-    max_code_len: int = 0,
     max_pairs: Optional[int],
 ) -> int:
     samples: List[Sample] = read_manifest(manifest_path)
@@ -183,8 +133,6 @@ def generate_for_manifest(
         pairs_per_target=pairs_per_target,
         min_text_len=min_text_len,
         min_code_len=min_code_len,
-        max_text_len=max_text_len,
-        max_code_len=max_code_len,
         max_pairs=max_pairs,
     )
     if not pairs:
@@ -199,40 +147,6 @@ def generate_for_manifest(
 def main() -> None:
     args = parse_args()
     random.seed(args.seed)
-
-    # --- Resolve length limits -------------------------------------------
-    # Explicit CLI values of -1 mean "no limit"; 0 means "read from config".
-    max_code_len: int = args.max_code_len
-    max_text_len: int = args.max_text_len
-
-    config_path: Optional[Path] = None
-    raw_config = Path(args.config).expanduser()
-    # Try as-is (works when called from project root or with an absolute path),
-    # then try relative to the tools/ directory's parent (project root) when the
-    # script is invoked from inside tools/.
-    _this_dir = Path(__file__).resolve().parent
-    for candidate in (raw_config.resolve(), (_this_dir.parent / raw_config).resolve()):
-        if candidate.exists():
-            config_path = candidate
-            break
-
-    if config_path is not None:
-        limits = _load_gpt_limits(config_path)
-        if max_code_len == 0 and limits["max_mel_tokens"] > 0:
-            max_code_len = limits["max_mel_tokens"]
-            print(f"[Generate] max_code_len set to {max_code_len} (from {config_path.name} gpt.max_mel_tokens)")
-        if max_text_len == 0 and limits["max_text_tokens"] > 0:
-            max_text_len = limits["max_text_tokens"]
-            print(f"[Generate] max_text_len set to {max_text_len} (from {config_path.name} gpt.max_text_tokens)")
-    elif args.max_code_len == 0 and args.max_text_len == 0:
-        print(f"[Generate] Warning: config not found at '{args.config}'; length filters disabled.")
-
-    # Normalise: -1 sentinel → 0 (build_pairs treats 0 as "no limit")
-    if max_code_len < 0:
-        max_code_len = 0
-    if max_text_len < 0:
-        max_text_len = 0
-    # -----------------------------------------------------------------------
 
     max_pairs = args.max_pairs if args.max_pairs > 0 else None
 
@@ -267,8 +181,6 @@ def main() -> None:
             pairs_per_target=args.pairs_per_target,
             min_text_len=args.min_text_len,
             min_code_len=args.min_code_len,
-            max_text_len=max_text_len,
-            max_code_len=max_code_len,
             max_pairs=max_pairs,
         )
         print(f"  - Wrote {train_count} train pairs -> {train_output.name}")
@@ -279,8 +191,6 @@ def main() -> None:
             pairs_per_target=args.pairs_per_target,
             min_text_len=args.min_text_len,
             min_code_len=args.min_code_len,
-            max_text_len=max_text_len,
-            max_code_len=max_code_len,
             max_pairs=max_pairs,
         )
         print(f"  - Wrote {val_count} val pairs -> {val_output.name}")

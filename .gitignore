@@ -44,5 +44,3 @@ prompts/
 *.ckpt
 *.safetensors
 tools/checkpoints/
-models
-models-asr

@@ -87,20 +87,19 @@ class IndexTTS2:
 
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None, use_deepspeed=False, use_accel=False, use_torch_compile=False,
-            strip_sentence_punctuation=False, cfm_cache_size=4096,
+            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False,
+            strip_sentence_punctuation=False,
     ):
         """
         Args:
             cfg_path (str): path to the config file.
             model_dir (str): path to the model directory.
             use_fp16 (bool): whether to use fp16.
-            device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, set automatically.
-            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel.
+            device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
+            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
             use_deepspeed (bool): whether to use DeepSpeed or not.
             use_accel (bool): whether to use acceleration engine for GPT2 or not.
             use_torch_compile (bool): whether to use torch.compile for optimization or not.
-            cfm_cache_size (int): max sequence length for CFM estimator KV cache. Default 4096.
         """
         if device is not None:
             self.device = device
@@ -181,8 +180,7 @@ class IndexTTS2:
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
         self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
             os.path.join(self.model_dir, self.cfg.w2v_stat))
-        # Keep semantic_model on CPU to save VRAM; it will be moved to GPU only during ref-audio caching
-        self.semantic_model = self.semantic_model.cpu()
+        self.semantic_model = self.semantic_model.to(self.device)
         self.semantic_model.eval()
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
@@ -205,8 +203,7 @@ class IndexTTS2:
             is_distributed=False,
         )
         self.s2mel = s2mel.to(self.device)
-        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=cfm_cache_size)
-        print(f">> CFM estimator KV cache allocated: max_seq_length={cfm_cache_size}")
+        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
         
         # Enable torch.compile optimization if requested
         if self.use_torch_compile:
@@ -226,8 +223,7 @@ class IndexTTS2:
             )
             campplus_model = CAMPPlus(feat_dim=80, embedding_size=self.campplus_dim)
             campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
-            # Keep campplus_model on CPU to save VRAM; it will be moved to GPU only during ref-audio caching
-            self.campplus_model = campplus_model.cpu()
+            self.campplus_model = campplus_model.to(self.device)
             self.campplus_model.eval()
             print(">> campplus_model weights restored from:", campplus_ckpt_path)
         except Exception as exc:
@@ -253,21 +249,6 @@ class IndexTTS2:
 
         spk_matrix = torch.load(os.path.join(self.model_dir, self.cfg.spk_matrix))
         self.spk_matrix = spk_matrix.to(self.device)
-
-        if self.dtype is not None:
-            # semantic_model stays on CPU but still convert to FP16 to save CPU RAM and ensure dtype match on GPU
-            self.semantic_model = self.semantic_model.to(self.dtype)
-            self.semantic_mean = self.semantic_mean.to(self.dtype)
-            self.semantic_std = self.semantic_std.to(self.dtype)
-            self.semantic_codec = self.semantic_codec.to(self.dtype)
-            self.s2mel = self.s2mel.to(self.dtype)
-            if self.campplus_model is not None:
-                # campplus_model stays on CPU but convert to FP16
-                self.campplus_model = self.campplus_model.to(self.dtype)
-            # BigVGAN also converted to FP16 for VRAM savings (~350MB)
-            self.bigvgan = self.bigvgan.to(self.dtype)
-            self.emo_matrix = self.emo_matrix.to(self.dtype)
-            self.spk_matrix = self.spk_matrix.to(self.dtype)
 
         self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
         self.spk_matrix = torch.split(self.spk_matrix, self.emo_num)
@@ -296,53 +277,6 @@ class IndexTTS2:
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
-
-    def load_gpt_weights(self, pth_path):
-        """
-        Swaps the GPT weights with a new .pth file.
-        Used for loading fine-tuned speaker models.
-
-        NOTE: Uses strict=False because .pth files are saved before post_init_gpt2_config()
-        creates the inference_model submodule. The missing inference_model.* / gpt.wte keys
-        share object references with the loaded GPT backbone and are updated automatically.
-        """
-        print(f">> Loading new GPT weights from: {pth_path}")
-        try:
-            checkpoint = torch.load(pth_path, map_location='cpu')
-            # Handle common wrapper keys (model / weight / state_dict)
-            if isinstance(checkpoint, dict):
-                for key in ('model', 'state_dict', 'weight'):
-                    if key in checkpoint:
-                        checkpoint = checkpoint[key]
-                        break
-
-            # Strip DDP 'module.' prefix if present
-            from collections import OrderedDict
-            clean = OrderedDict()
-            for k, v in checkpoint.items():
-                clean[k[7:] if k.startswith('module.') else k] = v
-
-            # strict=False: ignore inference_model.* / gpt.wte keys that only exist
-            # after post_init_gpt2_config() — they reference the same backbone objects.
-            missing, unexpected = self.gpt.load_state_dict(clean, strict=False)
-            truly_missing = [k for k in missing
-                             if not k.startswith('inference_model.') and k != 'gpt.wte.weight']
-            if truly_missing:
-                print(f">> Warning: {len(truly_missing)} non-inference keys missing: {truly_missing[:5]}")
-            if unexpected:
-                print(f">> Warning: {len(unexpected)} unexpected keys ignored.")
-
-            self.gpt = self.gpt.to(self.device)
-            if self.use_fp16:
-                self.gpt.eval().half()
-            else:
-                self.gpt.eval()
-            self.gpt_path = pth_path
-            print(">> GPT weights successfully updated.")
-            return True
-        except Exception as e:
-            print(f">> Failed to update GPT weights: {e}")
-            return False
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
@@ -596,7 +530,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, speed_factor=1.0, diffusion_steps=16, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, speed_factor=1.0, **generation_kwargs):
         text = self._normalize_text(text).strip()
         sentences = self._split_text_into_sentences(text)
 
@@ -607,7 +541,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
                 )
             try:
                 return list(self.infer_generator(
@@ -615,7 +549,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -627,7 +561,7 @@ class IndexTTS2:
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
             ))
             if result:
                 outputs.append(result[0])
@@ -648,7 +582,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, speed_factor=1.0, diffusion_steps=16, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, speed_factor=1.0, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -703,39 +637,23 @@ class IndexTTS2:
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
-            # --- CPU Offload: move semantic_model to GPU temporarily ---
-            self.semantic_model = self.semantic_model.to(self.device)
             inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
             input_features = inputs["input_features"]
             attention_mask = inputs["attention_mask"]
             input_features = input_features.to(self.device)
-            if self.dtype is not None:
-                input_features = input_features.to(self.dtype)
             attention_mask = attention_mask.to(self.device)
             spk_cond_emb = self.get_emb(input_features, attention_mask)
-            # Offload semantic_model back to CPU immediately after use
-            self.semantic_model = self.semantic_model.cpu()
-            torch.cuda.empty_cache()
 
             _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
-            if self.dtype is not None:
-                ref_mel = ref_mel.to(self.dtype)
             ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
             feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
                                                      num_mel_bins=80,
                                                      dither=0,
                                                      sample_frequency=16000)
             feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
-            if self.dtype is not None:
-                feat = feat.to(self.dtype)
             if self.campplus_model is not None:
-                # --- CPU Offload: move campplus_model to GPU temporarily ---
-                self.campplus_model = self.campplus_model.to(self.device)
                 style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
-                # Offload campplus_model back to CPU immediately after use
-                self.campplus_model = self.campplus_model.cpu()
-                torch.cuda.empty_cache()
             else:
                 style = torch.zeros((1, self.campplus_dim), device=ref_mel.device)
 
@@ -757,8 +675,6 @@ class IndexTTS2:
 
         if emo_vector is not None:
             weight_vector = torch.tensor(emo_vector, device=self.device)
-            if self.dtype is not None:
-                weight_vector = weight_vector.to(self.dtype)
             if use_random:
                 random_index = [random.randint(0, x - 1) for x in self.emo_num]
             else:
@@ -779,15 +695,8 @@ class IndexTTS2:
             emo_input_features = emo_inputs["input_features"]
             emo_attention_mask = emo_inputs["attention_mask"]
             emo_input_features = emo_input_features.to(self.device)
-            if self.dtype is not None:
-                emo_input_features = emo_input_features.to(self.dtype)
             emo_attention_mask = emo_attention_mask.to(self.device)
-            # --- CPU Offload: move semantic_model to GPU temporarily ---
-            self.semantic_model = self.semantic_model.to(self.device)
             emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
-            # Offload semantic_model back to CPU immediately after use
-            self.semantic_model = self.semantic_model.cpu()
-            torch.cuda.empty_cache()
 
             self.cache_emo_cond = emo_cond_emb
             self.cache_emo_audio_prompt = emo_audio_prompt
@@ -926,10 +835,10 @@ class IndexTTS2:
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
 
-                dtype = self.dtype
+                dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    _diffusion_steps = diffusion_steps  # from parameter (default 16, max 25)
+                    diffusion_steps = 25
                     inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
@@ -945,15 +854,13 @@ class IndexTTS2:
                     vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                                    torch.LongTensor([cat_condition.size(1)]).to(
                                                                        cond.device),
-                                                                   ref_mel, style, None, _diffusion_steps,
+                                                                   ref_mel, style, None, diffusion_steps,
                                                                    inference_cfg_rate=inference_cfg_rate)
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
 
                     m_start_time = time.perf_counter()
-                    # Dynamically match BigVGAN's dtype (FP16 or FP32) to avoid dtype mismatch
-                    _bvg_dtype = next(self.bigvgan.parameters()).dtype
-                    wav = self.bigvgan(vc_target.to(_bvg_dtype)).squeeze().unsqueeze(0)
+                    wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
                     print(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)

@@ -68,16 +68,7 @@ def parse_args() -> argparse.Namespace:
         "--val-ratio",
         type=float,
         default=0.01,
-        help="Validation ratio passed to preprocess_data.py (ignored when --val-count > 0).",
-    )
-    parser.add_argument(
-        "--val-count",
-        type=int,
-        default=0,
-        help=(
-            "Fixed total number of validation samples (0 = use --val-ratio). "
-            "Distributed evenly across worker processes; the remainder goes to worker 0."
-        ),
+        help="Validation ratio passed to preprocess_data.py (default: 0.01).",
     )
     parser.add_argument(
         "--skip-existing",
@@ -227,7 +218,6 @@ def launch_worker(
     worker_output: Path,
     args: argparse.Namespace,
     hf_env: Dict[str, str],
-    per_worker_val_count: int = 0,
 ) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -251,13 +241,9 @@ def launch_worker(
         str(args.batch_size),
         "--workers",
         str(args.workers),
+        "--val-ratio",
+        str(args.val_ratio),
     ]
-    # Validation split: fixed count takes priority over ratio.
-    if per_worker_val_count > 0:
-        cmd.extend(["--val-count", str(per_worker_val_count)])
-        cmd.extend(["--val-ratio", "0.0"])
-    else:
-        cmd.extend(["--val-ratio", str(args.val_ratio)])
     if args.skip_existing:
         cmd.append("--skip-existing")
     if args.audio_root:
@@ -347,9 +333,6 @@ def main() -> None:
 
     processes: List[subprocess.Popen] = []
     worker_dirs: List[Path] = []
-    # Compute per-worker validation quota when --val-count is requested.
-    total_val_count = getattr(args, "val_count", 0)
-    num_actual_workers = len(chunks)
     try:
         for idx, (chunk_path, count) in enumerate(chunks):
             worker_dir = output_dir / f"worker_{idx:02d}"
@@ -358,14 +341,7 @@ def main() -> None:
                 f"[preprocess_multiproc] Launching worker {idx:02d} "
                 f"({count} samples) -> dir {worker_dir}"
             )
-            # Distribute val quota: remainder goes to worker 0.
-            if total_val_count > 0:
-                base = total_val_count // num_actual_workers
-                extra = total_val_count % num_actual_workers
-                per_worker = base + (1 if idx < extra else 0)
-            else:
-                per_worker = 0
-            proc = launch_worker(chunk_path, worker_dir, args, hf_env, per_worker_val_count=per_worker)
+            proc = launch_worker(chunk_path, worker_dir, args, hf_env)
             processes.append(proc)
             worker_dirs.append(worker_dir)
             if idx < len(chunks) - 1 and args.launch_delay > 0:

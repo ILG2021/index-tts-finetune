@@ -284,19 +284,6 @@ class IndexTTS2:
         spk_matrix = torch.load(os.path.join(self.model_dir, self.cfg.spk_matrix))
         self.spk_matrix = spk_matrix.to(self.device)
 
-        if self.dtype is not None:
-            self.semantic_model = self.semantic_model.to(self.dtype)
-            self.semantic_mean = self.semantic_mean.to(self.dtype)
-            self.semantic_std = self.semantic_std.to(self.dtype)
-            self.semantic_codec = self.semantic_codec.to(self.dtype)
-            self.s2mel = self.s2mel.to(self.dtype)
-            if self.campplus_model is not None:
-                self.campplus_model = self.campplus_model.to(self.dtype)
-            # BigVGAN kept in float32 to ensure audio quality and avoid dtype mismatch
-            self.emo_matrix = self.emo_matrix.to(self.dtype)
-            self.spk_matrix = self.spk_matrix.to(self.dtype)
-            print(">> Converted all sub-models to FP16 to minimize VRAM and maximize speed.")
-
         self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
         self.spk_matrix = torch.split(self.spk_matrix, self.emo_num)
 
@@ -470,23 +457,17 @@ class IndexTTS2:
             input_features = inputs["input_features"]
             attention_mask = inputs["attention_mask"]
             input_features = input_features.to(self.device)
-            if self.dtype is not None:
-                input_features = input_features.to(self.dtype)
             attention_mask = attention_mask.to(self.device)
             spk_cond_emb = self.get_emb(input_features, attention_mask)
 
             _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
-            if self.dtype is not None:
-                ref_mel = ref_mel.to(self.dtype)
             ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
             feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
                                                      num_mel_bins=80,
                                                      dither=0,
                                                      sample_frequency=16000)
             feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
-            if self.dtype is not None:
-                feat = feat.to(self.dtype)
             style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
 
             prompt_condition = self.s2mel.models['length_regulator'](S_ref,
@@ -507,8 +488,6 @@ class IndexTTS2:
 
         if emo_vector is not None:
             weight_vector = torch.tensor(emo_vector).to(self.device)
-            if self.dtype is not None:
-                weight_vector = weight_vector.to(self.dtype)
             if use_random:
                 random_index = [random.randint(0, x - 1) for x in self.emo_num]
             else:
@@ -526,8 +505,6 @@ class IndexTTS2:
             emo_input_features = emo_inputs["input_features"]
             emo_attention_mask = emo_inputs["attention_mask"]
             emo_input_features = emo_input_features.to(self.device)
-            if self.dtype is not None:
-                emo_input_features = emo_input_features.to(self.dtype)
             emo_attention_mask = emo_attention_mask.to(self.device)
             emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
 
@@ -682,7 +659,7 @@ class IndexTTS2:
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
 
-                dtype = self.dtype
+                dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
                     diffusion_steps = 25
