@@ -269,27 +269,6 @@ class IndexTTS2:
             self.emo_matrix = self.emo_matrix.to(self.dtype)
             self.spk_matrix = self.spk_matrix.to(self.dtype)
 
-    def load_gpt_weights(self, pth_path):
-        """
-        Swaps the GPT weights with a new .pth file.
-        Used for loading fine-tuned speaker models.
-        """
-        print(f">> Loading new GPT weights from: {pth_path}")
-        try:
-            load_checkpoint(self.gpt, pth_path)
-            self.gpt = self.gpt.to(self.device)
-            if self.use_fp16:
-                self.gpt.eval().half()
-            else:
-                self.gpt.eval()
-            self.gpt_path = pth_path
-            print(">> GPT weights successfully updated.")
-            return True
-        except Exception as e:
-            print(f">> Failed to update GPT weights: {e}")
-            return False
-            print(">> Converted all sub-models to FP16 to minimize VRAM and maximize speed.")
-
         self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
         self.spk_matrix = torch.split(self.spk_matrix, self.emo_num)
 
@@ -317,6 +296,53 @@ class IndexTTS2:
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+
+    def load_gpt_weights(self, pth_path):
+        """
+        Swaps the GPT weights with a new .pth file.
+        Used for loading fine-tuned speaker models.
+
+        NOTE: Uses strict=False because .pth files are saved before post_init_gpt2_config()
+        creates the inference_model submodule. The missing inference_model.* / gpt.wte keys
+        share object references with the loaded GPT backbone and are updated automatically.
+        """
+        print(f">> Loading new GPT weights from: {pth_path}")
+        try:
+            checkpoint = torch.load(pth_path, map_location='cpu')
+            # Handle common wrapper keys (model / weight / state_dict)
+            if isinstance(checkpoint, dict):
+                for key in ('model', 'state_dict', 'weight'):
+                    if key in checkpoint:
+                        checkpoint = checkpoint[key]
+                        break
+
+            # Strip DDP 'module.' prefix if present
+            from collections import OrderedDict
+            clean = OrderedDict()
+            for k, v in checkpoint.items():
+                clean[k[7:] if k.startswith('module.') else k] = v
+
+            # strict=False: ignore inference_model.* / gpt.wte keys that only exist
+            # after post_init_gpt2_config() — they reference the same backbone objects.
+            missing, unexpected = self.gpt.load_state_dict(clean, strict=False)
+            truly_missing = [k for k in missing
+                             if not k.startswith('inference_model.') and k != 'gpt.wte.weight']
+            if truly_missing:
+                print(f">> Warning: {len(truly_missing)} non-inference keys missing: {truly_missing[:5]}")
+            if unexpected:
+                print(f">> Warning: {len(unexpected)} unexpected keys ignored.")
+
+            self.gpt = self.gpt.to(self.device)
+            if self.use_fp16:
+                self.gpt.eval().half()
+            else:
+                self.gpt.eval()
+            self.gpt_path = pth_path
+            print(">> GPT weights successfully updated.")
+            return True
+        except Exception as e:
+            print(f">> Failed to update GPT weights: {e}")
+            return False
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):

@@ -320,8 +320,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 gpt_model_selection = gr.Dropdown(
                     choices=list(AVAILABLE_MODELS.keys()),
                     value=list(AVAILABLE_MODELS.keys())[0],
-                    label=i18n("微调说话人模型"),
-                    info=i18n("选择已微调的说话人 GPT 模型（models 目录下），其余组件共用 checkpoints 目录")
+                    label=i18n("选择说话人"),
                 )
                 gpt_load_status = gr.Markdown(value=f"ℹ️ {i18n('当前状态')}: {i18n('就绪')}")
 
@@ -408,7 +407,10 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
-                    with gr.Accordion(i18n("预览分句结果"), open=False) as segments_settings:
+                    segments_toggle_btn = gr.Button(
+                        i18n("▶ 预览分句结果"), size="sm", variant="secondary"
+                    )
+                    with gr.Group(visible=False) as segments_settings:
                         segments_preview = gr.Dataframe(
                             headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
                             wrap=True,
@@ -568,13 +570,26 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     input_text_single.change(
         on_input_text_change,
         inputs=[input_text_single, max_text_tokens_per_segment],
-        outputs=[segments_preview]
+        outputs=[segments_preview],
+        trigger_mode="always_last",
     )
 
     max_text_tokens_per_segment.change(
         on_input_text_change,
         inputs=[input_text_single, max_text_tokens_per_segment],
-        outputs=[segments_preview]
+        outputs=[segments_preview],
+        trigger_mode="always_last",
+    )
+
+    def toggle_segments_preview(current_visible):
+        new_visible = not current_visible
+        label = i18n("▼ 隐藏分句结果") if new_visible else i18n("▶ 预览分句结果")
+        return gr.update(visible=new_visible), gr.update(value=label)
+
+    segments_toggle_btn.click(
+        toggle_segments_preview,
+        inputs=[segments_settings],
+        outputs=[segments_settings, segments_toggle_btn],
     )
 
     prompt_audio.upload(update_prompt_audio,
