@@ -87,7 +87,7 @@ class IndexTTS2:
 
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False,
+            use_cuda_kernel=None, use_deepspeed=False, use_accel=False, use_torch_compile=False,
             strip_sentence_punctuation=False,
     ):
         """
@@ -633,7 +633,7 @@ class IndexTTS2:
                 self.cache_s2mel_prompt = None
                 self.cache_mel = None
                 torch.cuda.empty_cache()
-            audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
+            audio, sr = self._load_and_cut_audio(spk_audio_prompt, 15, verbose)
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
@@ -690,7 +690,7 @@ class IndexTTS2:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
                 torch.cuda.empty_cache()
-            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
+            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt, 15, verbose, sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
             emo_attention_mask = emo_inputs["attention_mask"]
@@ -868,13 +868,21 @@ class IndexTTS2:
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
-                # wavs.append(wav[:, :-512])
-                wavs.append(wav.cpu())  # to cpu before saving
+                wav_cpu = wav.cpu()  # 先移到CPU
+                wavs.append(wav_cpu)
                 if stream_return:
-                    yield wav.cpu()
-                    if silence == None:
+                    yield wav_cpu
+                    if silence is None:
                         silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
                     yield silence
+
+                # 显式释放本 segment 占用的大型 GPU 中间张量，防止显存持续增长
+                del codes, speech_conditioning_latent, latent, S_infer, cond, \
+                    cat_condition, vc_target, wav, text_tokens, emovec
+                if emo_vector is not None:
+                    del emovec_mat
+                if self.device.startswith("cuda"):
+                    torch.cuda.empty_cache()
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "saving audio...")
