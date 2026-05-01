@@ -95,13 +95,12 @@ class IndexTTS2:
             cfg_path (str): path to the config file.
             model_dir (str): path to the model directory.
             use_fp16 (bool): whether to use fp16.
-            device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
-            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
+            device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, set automatically.
+            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel.
             use_deepspeed (bool): whether to use DeepSpeed or not.
             use_accel (bool): whether to use acceleration engine for GPT2 or not.
             use_torch_compile (bool): whether to use torch.compile for optimization or not.
-            cfm_cache_size (int): max sequence length for CFM estimator KV cache. Default 4096 (~32s audio).
-                                  Use 8192 for very long reference audio or segments.
+            cfm_cache_size (int): max sequence length for CFM estimator KV cache. Default 4096.
         """
         if device is not None:
             self.device = device
@@ -157,16 +156,6 @@ class IndexTTS2:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
-        # Apply INT8 weight-only quantization to GPT to halve its VRAM (~750MB savings)
-        # Requires: pip install torchao
-        try:
-            from torchao.quantization import quantize_, int8_weight_only
-            quantize_(self.gpt, int8_weight_only())
-            print(">> GPT INT8 weight-only quantization applied (~750MB VRAM saved)")
-        except ImportError:
-            print(">> torchao not installed; skipping INT8 quantization. Run: pip install torchao")
-        except Exception as _e:
-            print(f">> INT8 quantization failed ({_e}); continuing without.")
         print(">> GPT weights restored from:", self.gpt_path)
 
         if use_deepspeed:
