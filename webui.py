@@ -26,10 +26,12 @@ parser.add_argument("--port", type=int, default=7860, help="Port to run the web 
 parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to run the web UI on")
 parser.add_argument("--model_dir", type=str, default="./checkpoints", help="Model checkpoints directory")
 parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16 for inference if available")
-parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
-parser.add_argument("--cuda_kernel", action="store_true", default=False, help="Use CUDA kernel for inference if available")
+parser.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=True, help="Use DeepSpeed to accelerate if available (use --no-deepspeed to disable)")
+parser.add_argument("--cuda_kernel", action=argparse.BooleanOptionalAction, default=True, help="Use CUDA kernel for inference if available (use --no-cuda_kernel to disable)")
+parser.add_argument("--use_accel", action=argparse.BooleanOptionalAction, default=True, help="Enable Accel inference engine for GPT (use --no-use_accel to disable)")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
 parser.add_argument("--root_path", type=str, default=None, help="Root path for the web UI (useful for reverse proxies)")
+parser.add_argument("--use_torch_compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile for extreme speed (use --no-use_torch_compile to disable)")
 cmd_args = parser.parse_args()
 
 if not os.path.exists(cmd_args.model_dir):
@@ -60,8 +62,8 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_fp16=True,  # Forced to True for extreme speed and low VRAM
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
-                use_torch_compile=True,  # Enable torch.compile for extreme speed
-                use_accel=True,  # Enable Accel inference engine for GPT
+                use_torch_compile=cmd_args.use_torch_compile,  # Set via command line argument
+                use_accel=cmd_args.use_accel,  # Set via command line argument
                 )
 # 支持的语言列表
 LANGUAGES = {
