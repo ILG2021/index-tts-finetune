@@ -736,7 +736,12 @@ class IndexTTS2:
             if self.dtype is not None:
                 emo_input_features = emo_input_features.to(self.dtype)
             emo_attention_mask = emo_attention_mask.to(self.device)
+            # --- CPU Offload: move semantic_model to GPU temporarily ---
+            self.semantic_model = self.semantic_model.to(self.device)
             emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
+            # Offload semantic_model back to CPU immediately after use
+            self.semantic_model = self.semantic_model.cpu()
+            torch.cuda.empty_cache()
 
             self.cache_emo_cond = emo_cond_emb
             self.cache_emo_audio_prompt = emo_audio_prompt
