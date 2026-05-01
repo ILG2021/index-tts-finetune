@@ -1,9 +1,9 @@
-import html
 import json
 import os
 import sys
 import threading
 import time
+import glob
 
 import warnings
 
@@ -67,6 +67,32 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_accel=cmd_args.use_accel,  # Set via command line argument
                 cfm_cache_size=cmd_args.cfm_cache_size,
                 )
+
+def get_available_models():
+    # Default model from checkpoints
+    models = {i18n("默认 (Default)"): os.path.join(cmd_args.model_dir, "gpt.pth")}
+    
+    # Scan models directory
+    models_root = os.path.join(current_dir, "models")
+    if os.path.exists(models_root):
+        speaker_dirs = [d for d in os.listdir(models_root) if os.path.isdir(os.path.join(models_root, d))]
+        for speaker in speaker_dirs:
+            gpt_path = os.path.join(models_root, speaker, "gpt.pth")
+            if os.path.exists(gpt_path):
+                models[speaker] = gpt_path
+    return models
+
+AVAILABLE_MODELS = get_available_models()
+
+def change_gpt_model(model_name):
+    if model_name in AVAILABLE_MODELS:
+        pth_path = AVAILABLE_MODELS[model_name]
+        success = tts.load_gpt_weights(pth_path)
+        if success:
+            return gr.update(value=f"✅ {i18n('已切换至')}: {model_name}")
+        else:
+            return gr.update(value=f"❌ {i18n('切换失败')}: {model_name}")
+    return gr.update(value=f"❓ {i18n('未知模型')}: {model_name}")
 # 支持的语言列表
 LANGUAGES = {
     "中文": "zh_CN",
@@ -186,53 +212,70 @@ def audio_match_wrapper(ref_path, target_path, eq_strength, do_reverb, do_noise)
     )
     return output_path
 
+_ASR_RECOGNIZER = None
+
+def get_asr_recognizer():
+    global _ASR_RECOGNIZER
+    if _ASR_RECOGNIZER is not None:
+        return _ASR_RECOGNIZER
+
+    try:
+        import sherpa_onnx
+        from huggingface_hub import snapshot_download
+        import glob
+        
+        asr_base_dir = "models_asr"
+        model_dir = None
+        model_file = None
+        tokens_file = None
+        
+        # Scan models-asr for any custom model containing tokens.txt and *.onnx
+        if os.path.exists(asr_base_dir):
+            for subdir in os.listdir(asr_base_dir):
+                subdir_path = os.path.join(asr_base_dir, subdir)
+                if os.path.isdir(subdir_path):
+                    t_file = os.path.join(subdir_path, "tokens.txt")
+                    onnx_files = glob.glob(os.path.join(subdir_path, "*.onnx"))
+                    if os.path.exists(t_file) and len(onnx_files) > 0:
+                        model_dir = subdir_path
+                        tokens_file = t_file
+                        # Prioritize non-int8 model if multiple exist, else just pick the first
+                        model_file = next((f for f in onnx_files if "int8" not in f), onnx_files[0])
+                        print(f">> Found custom ASR model in {model_dir}, using {os.path.basename(model_file)}")
+                        break
+        
+        # Fallback to default if no valid custom model found
+        if model_dir is None:
+            model_dir = os.path.join(asr_base_dir, "sherpa-onnx-paraformer-zh-2023-09-14")
+            model_file = os.path.join(model_dir, "model.int8.onnx")
+            tokens_file = os.path.join(model_dir, "tokens.txt")
+            if not os.path.exists(model_file) or not os.path.exists(tokens_file):
+                print(f">> Downloading ASR model to {model_dir}...")
+                snapshot_download(repo_id="csukuangfj/sherpa-onnx-paraformer-zh-2023-09-14", local_dir=model_dir)
+
+        _ASR_RECOGNIZER = sherpa_onnx.OfflineRecognizer.from_paraformer(
+            paraformer=model_file,
+            tokens=tokens_file,
+            num_threads=1,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="greedy_search",
+        )
+        print(">> ASR model initialized and resident in memory.")
+        return _ASR_RECOGNIZER
+    except Exception as e:
+        print(f">> ASR Initialization Error: {e}")
+        return None
+
 def update_prompt_audio(audio_path):
     update_button = gr.update(interactive=True)
     text_result = None
     if audio_path is not None:
         try:
-            import sherpa_onnx
-            from huggingface_hub import snapshot_download
             import librosa
-            import glob
-            
-            asr_base_dir = "models_asr"
-            model_dir = None
-            model_file = None
-            tokens_file = None
-            
-            # Scan models-asr for any custom model containing tokens.txt and *.onnx
-            if os.path.exists(asr_base_dir):
-                for subdir in os.listdir(asr_base_dir):
-                    subdir_path = os.path.join(asr_base_dir, subdir)
-                    if os.path.isdir(subdir_path):
-                        t_file = os.path.join(subdir_path, "tokens.txt")
-                        onnx_files = glob.glob(os.path.join(subdir_path, "*.onnx"))
-                        if os.path.exists(t_file) and len(onnx_files) > 0:
-                            model_dir = subdir_path
-                            tokens_file = t_file
-                            # Prioritize non-int8 model if multiple exist, else just pick the first
-                            model_file = next((f for f in onnx_files if "int8" not in f), onnx_files[0])
-                            print(f"Found custom ASR model in {model_dir}, using {os.path.basename(model_file)}")
-                            break
-            
-            # Fallback to default if no valid custom model found
-            if model_dir is None:
-                model_dir = os.path.join(asr_base_dir, "sherpa-onnx-paraformer-zh-2023-09-14")
-                model_file = os.path.join(model_dir, "model.int8.onnx")
-                tokens_file = os.path.join(model_dir, "tokens.txt")
-                if not os.path.exists(model_file) or not os.path.exists(tokens_file):
-                    print(f"Downloading ASR model to {model_dir}...")
-                    snapshot_download(repo_id="csukuangfj/sherpa-onnx-paraformer-zh-2023-09-14", local_dir=model_dir)
-
-            recognizer = sherpa_onnx.OfflineRecognizer.from_paraformer(
-                paraformer=model_file,
-                tokens=tokens_file,
-                num_threads=1,
-                sample_rate=16000,
-                feature_dim=80,
-                decoding_method="greedy_search",
-            )
+            recognizer = get_asr_recognizer()
+            if recognizer is None:
+                return update_button, gr.update()
             
             audio, sample_rate = librosa.load(audio_path, sr=16000, mono=True)
             stream = recognizer.create_stream()
@@ -273,6 +316,21 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=True, visible=False)
 
         with gr.Accordion(i18n("功能设置")):
+            with gr.Row():
+                gpt_model_selection = gr.Dropdown(
+                    choices=list(AVAILABLE_MODELS.keys()),
+                    value=list(AVAILABLE_MODELS.keys())[0],
+                    label=i18n("微调说话人模型"),
+                    info=i18n("选择已微调的说话人 GPT 模型（models 目录下），其余组件共用 checkpoints 目录")
+                )
+                gpt_load_status = gr.Markdown(value=f"ℹ️ {i18n('当前状态')}: {i18n('就绪')}")
+
+            gpt_model_selection.change(
+                change_gpt_model,
+                inputs=[gpt_model_selection],
+                outputs=[gpt_load_status]
+            )
+
             # 情感控制选项部分
             with gr.Row():
                 emo_control_method = gr.Radio(
@@ -321,8 +379,6 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         with gr.Row(visible=False) as emo_weight_group:
             emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
 
-        with gr.Row():
-            speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
 
         with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
@@ -344,6 +400,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
                 with gr.Column(scale=2):
+                    speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
                     gr.Markdown(f'**{i18n("分句设置")}** _{i18n("参数会影响音频质量和生成速度")}_')
                     with gr.Row():
                         initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
@@ -351,10 +408,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
-                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
+                    with gr.Accordion(i18n("预览分句结果"), open=False) as segments_settings:
                         segments_preview = gr.Dataframe(
                             headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
-                            key="segments_preview",
                             wrap=True,
                         )
             advanced_params = [

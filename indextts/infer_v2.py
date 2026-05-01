@@ -268,6 +268,26 @@ class IndexTTS2:
             self.bigvgan = self.bigvgan.to(self.dtype)
             self.emo_matrix = self.emo_matrix.to(self.dtype)
             self.spk_matrix = self.spk_matrix.to(self.dtype)
+
+    def load_gpt_weights(self, pth_path):
+        """
+        Swaps the GPT weights with a new .pth file.
+        Used for loading fine-tuned speaker models.
+        """
+        print(f">> Loading new GPT weights from: {pth_path}")
+        try:
+            load_checkpoint(self.gpt, pth_path)
+            self.gpt = self.gpt.to(self.device)
+            if self.use_fp16:
+                self.gpt.eval().half()
+            else:
+                self.gpt.eval()
+            self.gpt_path = pth_path
+            print(">> GPT weights successfully updated.")
+            return True
+        except Exception as e:
+            print(f">> Failed to update GPT weights: {e}")
+            return False
             print(">> Converted all sub-models to FP16 to minimize VRAM and maximize speed.")
 
         self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
