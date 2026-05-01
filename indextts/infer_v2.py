@@ -157,6 +157,16 @@ class IndexTTS2:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
+        # Apply INT8 weight-only quantization to GPT to halve its VRAM (~750MB savings)
+        # Requires: pip install torchao
+        try:
+            from torchao.quantization import quantize_, int8_weight_only
+            quantize_(self.gpt, int8_weight_only())
+            print(">> GPT INT8 weight-only quantization applied (~750MB VRAM saved)")
+        except ImportError:
+            print(">> torchao not installed; skipping INT8 quantization. Run: pip install torchao")
+        except Exception as _e:
+            print(f">> INT8 quantization failed ({_e}); continuing without.")
         print(">> GPT weights restored from:", self.gpt_path)
 
         if use_deepspeed:
@@ -265,7 +275,8 @@ class IndexTTS2:
             if self.campplus_model is not None:
                 # campplus_model stays on CPU but convert to FP16
                 self.campplus_model = self.campplus_model.to(self.dtype)
-            # BigVGAN kept in float32 to ensure audio quality and avoid dtype mismatch
+            # BigVGAN also converted to FP16 for VRAM savings (~350MB)
+            self.bigvgan = self.bigvgan.to(self.dtype)
             self.emo_matrix = self.emo_matrix.to(self.dtype)
             self.spk_matrix = self.spk_matrix.to(self.dtype)
             print(">> Converted all sub-models to FP16 to minimize VRAM and maximize speed.")
@@ -550,7 +561,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, speed_factor=1.0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, speed_factor=1.0, diffusion_steps=16, **generation_kwargs):
         text = self._normalize_text(text).strip()
         sentences = self._split_text_into_sentences(text)
 
@@ -561,7 +572,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
                 )
             try:
                 return list(self.infer_generator(
@@ -569,7 +580,7 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -581,7 +592,7 @@ class IndexTTS2:
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, speed_factor=speed_factor, diffusion_steps=diffusion_steps, **generation_kwargs
             ))
             if result:
                 outputs.append(result[0])
@@ -602,7 +613,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, speed_factor=1.0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, speed_factor=1.0, diffusion_steps=16, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -883,7 +894,7 @@ class IndexTTS2:
                 dtype = self.dtype
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
+                    _diffusion_steps = diffusion_steps  # from parameter (default 16, max 25)
                     inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
@@ -899,13 +910,15 @@ class IndexTTS2:
                     vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                                    torch.LongTensor([cat_condition.size(1)]).to(
                                                                        cond.device),
-                                                                   ref_mel, style, None, diffusion_steps,
+                                                                   ref_mel, style, None, _diffusion_steps,
                                                                    inference_cfg_rate=inference_cfg_rate)
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
 
                     m_start_time = time.perf_counter()
-                    wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+                    # Dynamically match BigVGAN's dtype (FP16 or FP32) to avoid dtype mismatch
+                    _bvg_dtype = next(self.bigvgan.parameters()).dtype
+                    wav = self.bigvgan(vc_target.to(_bvg_dtype)).squeeze().unsqueeze(0)
                     print(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
