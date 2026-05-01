@@ -4,7 +4,6 @@ import os
 import sys
 import threading
 import time
-import glob
 
 import warnings
 
@@ -18,6 +17,7 @@ sys.path.append(current_dir)
 sys.path.append(os.path.join(current_dir, "indextts"))
 
 import argparse
+
 parser = argparse.ArgumentParser(
     description="IndexTTS WebUI",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -27,13 +27,15 @@ parser.add_argument("--port", type=int, default=7860, help="Port to run the web 
 parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to run the web UI on")
 parser.add_argument("--model_dir", type=str, default="./checkpoints", help="Model checkpoints directory")
 parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16 for inference if available")
-parser.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=True, help="Use DeepSpeed to accelerate if available (use --no-deepspeed to disable)")
-parser.add_argument("--cuda_kernel", action=argparse.BooleanOptionalAction, default=True, help="Use CUDA kernel for inference if available (use --no-cuda_kernel to disable)")
-parser.add_argument("--use_accel", action=argparse.BooleanOptionalAction, default=True, help="Enable Accel inference engine for GPT (use --no-use_accel to disable)")
+parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
+parser.add_argument("--cuda_kernel", action="store_true", default=False,
+                    help="Use CUDA kernel for inference if available")
+parser.add_argument("--torch_compile", action="store_true", default=False,
+                    help="Use CUDA kernel for inference if available")
+parser.add_argument("--accel", action="store_true", default=False,
+                    help="Use CUDA kernel for inference if available")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
 parser.add_argument("--root_path", type=str, default=None, help="Root path for the web UI (useful for reverse proxies)")
-parser.add_argument("--use_torch_compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile for extreme speed (use --no-use_torch_compile to disable)")
-parser.add_argument("--cfm_cache_size", type=int, default=4096, help="Max sequence length for CFM estimator KV cache (default: 4096, use 8192 for very long ref audio or segments)")
 cmd_args = parser.parse_args()
 
 if not os.path.exists(cmd_args.model_dir):
@@ -61,52 +63,25 @@ i18n = I18nAuto(language="zh_CN")
 MODE = 'local'
 tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
-                use_fp16=True,  # Forced to True for extreme speed and low VRAM
+                use_fp16=cmd_args.fp16,
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
-                use_torch_compile=cmd_args.use_torch_compile,  # Set via command line argument
-                use_accel=cmd_args.use_accel,  # Set via command line argument
-                cfm_cache_size=cmd_args.cfm_cache_size,
+                use_accel=cmd_args.accel,
+                use_torch_compile=cmd_args.torch_compile
                 )
-
-def get_available_models():
-    # Default model from checkpoints
-    models = {i18n("默认 (Default)"): os.path.join(cmd_args.model_dir, "gpt.pth")}
-    
-    # Scan models directory
-    models_root = os.path.join(current_dir, "models")
-    if os.path.exists(models_root):
-        speaker_dirs = [d for d in os.listdir(models_root) if os.path.isdir(os.path.join(models_root, d))]
-        for speaker in speaker_dirs:
-            gpt_path = os.path.join(models_root, speaker, "gpt.pth")
-            if os.path.exists(gpt_path):
-                models[speaker] = gpt_path
-    return models
-
-AVAILABLE_MODELS = get_available_models()
-
-def change_gpt_model(model_name):
-    if model_name in AVAILABLE_MODELS:
-        pth_path = AVAILABLE_MODELS[model_name]
-        success = tts.load_gpt_weights(pth_path)
-        if success:
-            return gr.update(value=f"✅ {i18n('已切换至')}: {model_name}")
-        else:
-            return gr.update(value=f"❌ {i18n('切换失败')}: {model_name}")
-    return gr.update(value=f"❓ {i18n('未知模型')}: {model_name}")
 # 支持的语言列表
 LANGUAGES = {
     "中文": "zh_CN",
     "English": "en_US"
 }
 EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
-                i18n("使用情感参考音频"),
-                i18n("使用情感向量控制"),
-                i18n("使用情感描述文本控制")]
+                   i18n("使用情感参考音频"),
+                   i18n("使用情感向量控制"),
+                   i18n("使用情感描述文本控制")]
 EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL  # skip experimental features
 
-os.makedirs("outputs/tasks",exist_ok=True)
-os.makedirs("prompts",exist_ok=True)
+os.makedirs("outputs/tasks", exist_ok=True)
+os.makedirs("prompts", exist_ok=True)
 
 MAX_LENGTH_TO_USE_SPEED = 70
 example_cases = []
@@ -116,47 +91,49 @@ with open("examples/cases.jsonl", "r", encoding="utf-8") as f:
         if not line:
             continue
         example = json.loads(line)
-        if example.get("emo_audio",None):
-            emo_audio_path = os.path.join("examples",example["emo_audio"])
+        if example.get("emo_audio", None):
+            emo_audio_path = os.path.join("examples", example["emo_audio"])
         else:
             emo_audio_path = None
 
         example_cases.append([os.path.join("examples", example.get("prompt_audio", "sample_prompt.wav")),
-                              EMO_CHOICES_ALL[example.get("emo_mode",0)],
+                              EMO_CHOICES_ALL[example.get("emo_mode", 0)],
                               example.get("text"),
-                             emo_audio_path,
-                             example.get("emo_weight",1.0),
-                             example.get("emo_text",""),
-                             example.get("emo_vec_1",0),
-                             example.get("emo_vec_2",0),
-                             example.get("emo_vec_3",0),
-                             example.get("emo_vec_4",0),
-                             example.get("emo_vec_5",0),
-                             example.get("emo_vec_6",0),
-                             example.get("emo_vec_7",0),
-                             example.get("emo_vec_8",0),
-                             ])
+                              emo_audio_path,
+                              example.get("emo_weight", 1.0),
+                              example.get("emo_text", ""),
+                              example.get("emo_vec_1", 0),
+                              example.get("emo_vec_2", 0),
+                              example.get("emo_vec_3", 0),
+                              example.get("emo_vec_4", 0),
+                              example.get("emo_vec_5", 0),
+                              example.get("emo_vec_6", 0),
+                              example.get("emo_vec_7", 0),
+                              example.get("emo_vec_8", 0),
+                              ])
 
-def get_example_cases(include_experimental = False):
+
+def get_example_cases(include_experimental=False):
     if include_experimental:
         return example_cases  # show every example
 
     # exclude emotion control mode 3 (emotion from text description)
     return [x for x in example_cases if x[1] != EMO_CHOICES_ALL[3]]
 
-def gen_single(emo_control_method,prompt, text,
+
+def gen_single(emo_control_method, prompt, text,
                emo_ref_path, emo_weight,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-               emo_text,emo_random, speed_factor,
+               emo_text, emo_random, speed_factor,
                max_text_tokens_per_segment=120,
-                *args, progress=gr.Progress()):
+               *args, progress=gr.Progress()):
     output_path = None
     if not output_path:
         output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
     # set gradio progress
     tts.gr_progress = progress
     do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens, diffusion_steps = args
+        length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
     kwargs = {
         "do_sample": bool(do_sample),
         "top_p": float(top_p),
@@ -191,12 +168,12 @@ def gen_single(emo_control_method,prompt, text,
                        output_path=output_path,
                        emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
                        emo_vector=vec,
-                       use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
+                       use_emo_text=(emo_control_method == 3), emo_text=emo_text, use_random=emo_random,
                        verbose=cmd_args.verbose, speed_factor=float(speed_factor),
                        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                       diffusion_steps=int(diffusion_steps),
                        **kwargs)
-    return gr.update(value=output,visible=True)
+    return gr.update(value=output, visible=True)
+
 
 def audio_match_wrapper(ref_path, target_path, eq_strength, do_reverb, do_noise):
     if ref_path is None or target_path is None:
@@ -213,7 +190,9 @@ def audio_match_wrapper(ref_path, target_path, eq_strength, do_reverb, do_noise)
     )
     return output_path
 
+
 _ASR_RECOGNIZER = None
+
 
 def get_asr_recognizer():
     global _ASR_RECOGNIZER
@@ -224,12 +203,12 @@ def get_asr_recognizer():
         import sherpa_onnx
         from huggingface_hub import snapshot_download
         import glob
-        
+
         asr_base_dir = "models_asr"
         model_dir = None
         model_file = None
         tokens_file = None
-        
+
         # Scan models-asr for any custom model containing tokens.txt and *.onnx
         if os.path.exists(asr_base_dir):
             for subdir in os.listdir(asr_base_dir):
@@ -244,7 +223,7 @@ def get_asr_recognizer():
                         model_file = next((f for f in onnx_files if "int8" not in f), onnx_files[0])
                         print(f">> Found custom ASR model in {model_dir}, using {os.path.basename(model_file)}")
                         break
-        
+
         # Fallback to default if no valid custom model found
         if model_dir is None:
             model_dir = os.path.join(asr_base_dir, "sherpa-onnx-paraformer-zh-2023-09-14")
@@ -268,6 +247,7 @@ def get_asr_recognizer():
         print(f">> ASR Initialization Error: {e}")
         return None
 
+
 def update_prompt_audio(audio_path):
     update_button = gr.update(interactive=True)
     text_result = None
@@ -277,7 +257,7 @@ def update_prompt_audio(audio_path):
             recognizer = get_asr_recognizer()
             if recognizer is None:
                 return update_button, gr.update()
-            
+
             audio, sample_rate = librosa.load(audio_path, sr=16000, mono=True)
             stream = recognizer.create_stream()
             stream.accept_waveform(16000, audio)
@@ -292,51 +272,42 @@ def update_prompt_audio(audio_path):
     return update_button, gr.update()
 
 def create_warning_message(warning_text):
-    return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
+    return gr.HTML(
+        f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
+
 
 def create_experimental_warning_message():
     return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
+
 
 with gr.Blocks(title="IndexTTS Demo") as demo:
     mutex = threading.Lock()
 
     with gr.Tab(i18n("音频生成")):
         with gr.Row():
-            os.makedirs("prompts",exist_ok=True)
-            prompt_audio = gr.Audio(label=i18n("音色参考音频"),key="prompt_audio",
-                                    sources=["upload","microphone"],type="filepath")
+            os.makedirs("prompts", exist_ok=True)
+            prompt_audio = gr.Audio(label=i18n("音色参考音频"), key="prompt_audio",
+                                    sources=["upload", "microphone"], type="filepath")
             prompt_list = os.listdir("prompts")
             default = ''
             if prompt_list:
                 default = prompt_list[0]
             with gr.Column():
-                input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
-                gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True)
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio")
+                input_text_single = gr.TextArea(label=i18n("文本"), key="input_text_single",
+                                                placeholder=i18n("请输入目标文本"),
+                                                info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
+                gen_button = gr.Button(i18n("生成语音"), key="gen_button", interactive=True)
+            output_audio = gr.Audio(label=i18n("生成结果"), visible=True, key="output_audio")
 
         experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=True, visible=False)
 
         with gr.Accordion(i18n("功能设置")):
-            with gr.Row():
-                gpt_model_selection = gr.Dropdown(
-                    choices=list(AVAILABLE_MODELS.keys()),
-                    value=list(AVAILABLE_MODELS.keys())[0],
-                    label=i18n("选择说话人"),
-                )
-                gpt_load_status = gr.Markdown(value=f"ℹ️ {i18n('当前状态')}: {i18n('就绪')}")
-
-            gpt_model_selection.change(
-                change_gpt_model,
-                inputs=[gpt_model_selection],
-                outputs=[gpt_load_status]
-            )
-
             # 情感控制选项部分
             with gr.Row():
                 emo_control_method = gr.Radio(
                     choices=EMO_CHOICES_OFFICIAL,
                     type="index",
-                    value=EMO_CHOICES_OFFICIAL[0],label=i18n("情感控制方式"))
+                    value=EMO_CHOICES_OFFICIAL[0], label=i18n("情感控制方式"))
                 # we MUST have an extra, INVISIBLE list of *all* emotion control
                 # methods so that gr.Dataset() can fetch ALL control mode labels!
                 # otherwise, the gr.Dataset()'s experimental labels would be empty!
@@ -379,6 +350,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         with gr.Row(visible=False) as emo_weight_group:
             emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
 
+        with gr.Row():
+            speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
 
         with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
@@ -390,17 +363,15 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     with gr.Row():
                         top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
                         top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
-                        num_beams = gr.Slider(label="num_beams", value=1, minimum=1, maximum=10, step=1)
+                        num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
                     with gr.Row():
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
                     max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
-                    diffusion_steps = gr.Slider(label=i18n("扩散采样步数"), value=25, minimum=1, maximum=25, step=1, info=i18n("S2Mel流匹配步数，越少越快，建议10~20，最高25"), key="diffusion_steps")
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
                 with gr.Column(scale=2):
-                    speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
                     gr.Markdown(f'**{i18n("分句设置")}** _{i18n("参数会影响音频质量和生成速度")}_')
                     with gr.Row():
                         initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
@@ -408,47 +379,48 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
-                    segments_toggle_btn = gr.Button(
-                        i18n("▶ 预览分句结果"), size="sm", variant="secondary"
-                    )
-                    with gr.Group(visible=False) as segments_settings:
+                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
                         segments_preview = gr.Dataframe(
                             headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
+                            key="segments_preview",
                             wrap=True,
                         )
             advanced_params = [
                 do_sample, top_p, top_k, temperature,
                 length_penalty, num_beams, repetition_penalty, max_mel_tokens,
-                diffusion_steps,
+                # typical_sampling, typical_mass,
             ]
+
 
         # we must use `gr.Dataset` to support dynamic UI rewrites, since `gr.Examples`
         # binds tightly to UI and always restores the initial state of all components,
         # such as the list of available choices in emo_control_method.
         example_table = gr.Dataset(label="Examples",
-            samples_per_page=20,
-            samples=get_example_cases(include_experimental=False),
-            type="values",
-            # these components are NOT "connected". it just reads the column labels/available
-            # states from them, so we MUST link to the "all options" versions of all components,
-            # such as `emo_control_method_all` (to be able to see EXPERIMENTAL text labels)!
-            components=[prompt_audio,
-                        emo_control_method_all,  # important: support all mode labels!
-                        input_text_single,
-                        emo_upload,
-                        emo_weight,
-                        emo_text,
-                        vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        )
+                                   samples_per_page=20,
+                                   samples=get_example_cases(include_experimental=False),
+                                   type="values",
+                                   # these components are NOT "connected". it just reads the column labels/available
+                                   # states from them, so we MUST link to the "all options" versions of all components,
+                                   # such as `emo_control_method_all` (to be able to see EXPERIMENTAL text labels)!
+                                   components=[prompt_audio,
+                                               emo_control_method_all,  # important: support all mode labels!
+                                               input_text_single,
+                                               emo_upload,
+                                               emo_weight,
+                                               emo_text,
+                                               vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+                                   )
 
     with gr.Tab(i18n("声场匹配")):
-        gr.Markdown(i18n("将目标音频（B）的声场特征（EQ、混响、噪声底）匹配到参考音频（A）。常用于使 TTS 语音听起来更像是在特定环境下录制的。"))
+        gr.Markdown(i18n(
+            "将目标音频（B）的声场特征（EQ、混响、噪声底）匹配到参考音频（A）。常用于使 TTS 语音听起来更像是在特定环境下录制的。"))
         with gr.Row():
             with gr.Column():
                 match_ref_audio = gr.Audio(label=i18n("参考音频 (A)"), type="filepath")
                 match_tgt_audio = gr.Audio(label=i18n("目标音频 (B)"), type="filepath")
                 with gr.Row():
-                    match_eq_strength = gr.Slider(label=i18n("EQ 匹配强度"), minimum=0.0, maximum=1.0, value=0.8, step=0.05)
+                    match_eq_strength = gr.Slider(label=i18n("EQ 匹配强度"), minimum=0.0, maximum=1.0, value=0.8,
+                                                  step=0.05)
                     match_do_reverb = gr.Checkbox(label=i18n("开启混响匹配"), value=True)
                     match_do_noise = gr.Checkbox(label=i18n("开启噪声底匹配"), value=True)
                 match_btn = gr.Button(i18n("开始匹配"), variant="primary")
@@ -460,6 +432,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             inputs=[match_ref_audio, match_tgt_audio, match_eq_strength, match_do_reverb, match_do_noise],
             outputs=[match_output_audio]
         )
+
 
     def on_example_click(example):
         print(f"Example clicked: ({len(example)} values) = {example!r}")
@@ -480,6 +453,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             gr.update(value=example[13]),
         )
 
+
     # click() event works on both desktop and mobile UI
     example_table.click(on_example_click,
                         inputs=[example_table],
@@ -490,13 +464,15 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                                  emo_weight,
                                  emo_text,
                                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-    )
+                        )
+
 
     def on_input_text_change(text, max_text_tokens_per_segment):
         if text and len(text) > 0:
             text_tokens_list = tts.tokenizer.tokenize(text)
 
-            segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
+            segments = tts.tokenizer.split_segments(text_tokens_list,
+                                                    max_text_tokens_per_segment=int(max_text_tokens_per_segment))
             data = []
             for i, s in enumerate(segments):
                 segment_str = ''.join(s)
@@ -510,6 +486,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             return {
                 segments_preview: gr.update(value=df),
             }
+
 
     def on_method_change(emo_control_method):
         if emo_control_method == 1:  # emotion reference audio
@@ -541,14 +518,16 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     gr.update(visible=False)
                     )
 
+
     emo_control_method.change(on_method_change,
-        inputs=[emo_control_method],
-        outputs=[emotion_reference_group,
-                 emotion_randomize_group,
-                 emotion_vector_group,
-                 emo_text_group,
-                 emo_weight_group]
-    )
+                              inputs=[emo_control_method],
+                              outputs=[emotion_reference_group,
+                                       emotion_randomize_group,
+                                       emotion_vector_group,
+                                       emo_text_group,
+                                       emo_weight_group]
+                              )
+
 
     def on_experimental_change(is_experimental, current_mode_index):
         # 切换情感控制选项
@@ -562,6 +541,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             gr.update(samples=get_example_cases(include_experimental=is_experimental)),
         )
 
+
     experimental_checkbox.change(
         on_experimental_change,
         inputs=[experimental_checkbox, emo_control_method],
@@ -571,46 +551,27 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     input_text_single.change(
         on_input_text_change,
         inputs=[input_text_single, max_text_tokens_per_segment],
-        outputs=[segments_preview],
-        trigger_mode="always_last",
+        outputs=[segments_preview]
     )
 
     max_text_tokens_per_segment.change(
         on_input_text_change,
         inputs=[input_text_single, max_text_tokens_per_segment],
-        outputs=[segments_preview],
-        trigger_mode="always_last",
-    )
-
-    def toggle_segments_preview(current_visible):
-        new_visible = not current_visible
-        label = i18n("▼ 隐藏分句结果") if new_visible else i18n("▶ 预览分句结果")
-        return gr.update(visible=new_visible), gr.update(value=label)
-
-    segments_toggle_btn.click(
-        toggle_segments_preview,
-        inputs=[segments_settings],
-        outputs=[segments_settings, segments_toggle_btn],
+        outputs=[segments_preview]
     )
 
     prompt_audio.upload(update_prompt_audio,
-                         inputs=[prompt_audio],
-                         outputs=[gen_button, input_text_single])
-    
-    prompt_audio.change(update_prompt_audio,
-                         inputs=[prompt_audio],
-                         outputs=[gen_button, input_text_single])
+                        inputs=[prompt_audio],
+                        outputs=[gen_button, input_text_single])
 
     gen_button.click(gen_single,
-                     inputs=[emo_control_method,prompt_audio, input_text_single, emo_upload, emo_weight,
-                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-                             emo_text,emo_random, speed_factor,
+                     inputs=[emo_control_method, prompt_audio, input_text_single, emo_upload, emo_weight,
+                             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                             emo_text, emo_random, speed_factor,
                              max_text_tokens_per_segment,
                              *advanced_params,
-                     ],
+                             ],
                      outputs=[output_audio])
-
-
 
 if __name__ == "__main__":
     demo.queue(20)
