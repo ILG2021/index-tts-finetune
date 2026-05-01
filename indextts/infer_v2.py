@@ -87,8 +87,8 @@ class IndexTTS2:
 
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False,
-            strip_sentence_punctuation=False,
+            use_cuda_kernel=None, use_deepspeed=False, use_accel=False, use_torch_compile=False,
+            strip_sentence_punctuation=False, cfm_cache_size=4096,
     ):
         """
         Args:
@@ -100,6 +100,8 @@ class IndexTTS2:
             use_deepspeed (bool): whether to use DeepSpeed or not.
             use_accel (bool): whether to use acceleration engine for GPT2 or not.
             use_torch_compile (bool): whether to use torch.compile for optimization or not.
+            cfm_cache_size (int): max sequence length for CFM estimator KV cache. Default 4096 (~32s audio).
+                                  Use 8192 for very long reference audio or segments.
         """
         if device is not None:
             self.device = device
@@ -180,7 +182,8 @@ class IndexTTS2:
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
         self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
             os.path.join(self.model_dir, self.cfg.w2v_stat))
-        self.semantic_model = self.semantic_model.to(self.device)
+        # Keep semantic_model on CPU to save VRAM; it will be moved to GPU only during ref-audio caching
+        self.semantic_model = self.semantic_model.cpu()
         self.semantic_model.eval()
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
@@ -203,7 +206,8 @@ class IndexTTS2:
             is_distributed=False,
         )
         self.s2mel = s2mel.to(self.device)
-        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=cfm_cache_size)
+        print(f">> CFM estimator KV cache allocated: max_seq_length={cfm_cache_size}")
         
         # Enable torch.compile optimization if requested
         if self.use_torch_compile:
@@ -223,7 +227,8 @@ class IndexTTS2:
             )
             campplus_model = CAMPPlus(feat_dim=80, embedding_size=self.campplus_dim)
             campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
-            self.campplus_model = campplus_model.to(self.device)
+            # Keep campplus_model on CPU to save VRAM; it will be moved to GPU only during ref-audio caching
+            self.campplus_model = campplus_model.cpu()
             self.campplus_model.eval()
             print(">> campplus_model weights restored from:", campplus_ckpt_path)
         except Exception as exc:
@@ -251,12 +256,14 @@ class IndexTTS2:
         self.spk_matrix = spk_matrix.to(self.device)
 
         if self.dtype is not None:
+            # semantic_model stays on CPU but still convert to FP16 to save CPU RAM and ensure dtype match on GPU
             self.semantic_model = self.semantic_model.to(self.dtype)
             self.semantic_mean = self.semantic_mean.to(self.dtype)
             self.semantic_std = self.semantic_std.to(self.dtype)
             self.semantic_codec = self.semantic_codec.to(self.dtype)
             self.s2mel = self.s2mel.to(self.dtype)
             if self.campplus_model is not None:
+                # campplus_model stays on CPU but convert to FP16
                 self.campplus_model = self.campplus_model.to(self.dtype)
             # BigVGAN kept in float32 to ensure audio quality and avoid dtype mismatch
             self.emo_matrix = self.emo_matrix.to(self.dtype)
@@ -650,6 +657,8 @@ class IndexTTS2:
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
+            # --- CPU Offload: move semantic_model to GPU temporarily ---
+            self.semantic_model = self.semantic_model.to(self.device)
             inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
             input_features = inputs["input_features"]
             attention_mask = inputs["attention_mask"]
@@ -658,6 +667,9 @@ class IndexTTS2:
                 input_features = input_features.to(self.dtype)
             attention_mask = attention_mask.to(self.device)
             spk_cond_emb = self.get_emb(input_features, attention_mask)
+            # Offload semantic_model back to CPU immediately after use
+            self.semantic_model = self.semantic_model.cpu()
+            torch.cuda.empty_cache()
 
             _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
@@ -672,7 +684,12 @@ class IndexTTS2:
             if self.dtype is not None:
                 feat = feat.to(self.dtype)
             if self.campplus_model is not None:
+                # --- CPU Offload: move campplus_model to GPU temporarily ---
+                self.campplus_model = self.campplus_model.to(self.device)
                 style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
+                # Offload campplus_model back to CPU immediately after use
+                self.campplus_model = self.campplus_model.cpu()
+                torch.cuda.empty_cache()
             else:
                 style = torch.zeros((1, self.campplus_dim), device=ref_mel.device)
 

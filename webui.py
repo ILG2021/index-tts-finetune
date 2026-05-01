@@ -32,6 +32,7 @@ parser.add_argument("--use_accel", action=argparse.BooleanOptionalAction, defaul
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
 parser.add_argument("--root_path", type=str, default=None, help="Root path for the web UI (useful for reverse proxies)")
 parser.add_argument("--use_torch_compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile for extreme speed (use --no-use_torch_compile to disable)")
+parser.add_argument("--cfm_cache_size", type=int, default=4096, help="Max sequence length for CFM estimator KV cache (default: 4096, use 8192 for very long ref audio or segments)")
 cmd_args = parser.parse_args()
 
 if not os.path.exists(cmd_args.model_dir):
@@ -64,6 +65,7 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_cuda_kernel=cmd_args.cuda_kernel,
                 use_torch_compile=cmd_args.use_torch_compile,  # Set via command line argument
                 use_accel=cmd_args.use_accel,  # Set via command line argument
+                cfm_cache_size=cmd_args.cfm_cache_size,
                 )
 # 支持的语言列表
 LANGUAGES = {
