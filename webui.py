@@ -379,7 +379,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
-                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
+                    with gr.Accordion(i18n("预览分句结果"), open=False) as segments_settings:
                         segments_preview = gr.Dataframe(
                             headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
                             key="segments_preview",
