@@ -69,6 +69,20 @@ def parse_args() -> argparse.Namespace:
         help="Skip targets whose semantic code length is below this threshold.",
     )
     parser.add_argument(
+        "--max-text-len",
+        type=int,
+        default=0,
+        help="Skip targets whose text length exceeds this value (0 = no upper limit). "
+             "Recommended: max_text_tokens from config (default 120).",
+    )
+    parser.add_argument(
+        "--max-code-len",
+        type=int,
+        default=0,
+        help="Skip targets whose semantic code length exceeds this value (0 = no upper limit). "
+             "Recommended: max_mel_tokens from config (default 1815).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=2025,
@@ -134,6 +148,8 @@ def build_pairs(
     pairs_per_target: int,
     min_text_len: int,
     min_code_len: int,
+    max_text_len: int = 0,
+    max_code_len: int = 0,
     max_pairs: Optional[int] = None,
 ) -> List[Dict]:
     output: List[Dict] = []
@@ -146,6 +162,10 @@ def build_pairs(
 
         for target in items:
             if target.text_len < min_text_len or target.code_len < min_code_len:
+                continue
+            if max_text_len > 0 and target.text_len > max_text_len:
+                continue
+            if max_code_len > 0 and target.code_len > max_code_len:
                 continue
 
             prompts = [sample for sample in items if sample.id != target.id]
@@ -195,6 +215,8 @@ def main() -> None:
         pairs_per_target=args.pairs_per_target,
         min_text_len=args.min_text_len,
         min_code_len=args.min_code_len,
+        max_text_len=args.max_text_len,
+        max_code_len=args.max_code_len,
         max_pairs=max_pairs,
     )
 

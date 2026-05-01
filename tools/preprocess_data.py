@@ -82,6 +82,23 @@ def assign_to_validation(sample_id: str, ratio: float) -> bool:
     return (value / 1_000_000) < ratio
 
 
+def assign_to_validation_by_count(
+    sample_id: str, current_val_count: int, target_val_count: int
+) -> bool:
+    """Deterministically assign samples to validation using a fixed count limit.
+
+    Computes a SHA-1 hash of the sample ID so that the same samples are
+    selected on resume runs. Approximately 50 % of samples are candidates;
+    selection stops once *target_val_count* is reached.
+    """
+    if target_val_count <= 0 or current_val_count >= target_val_count:
+        return False
+    digest = hashlib.sha1(sample_id.encode("utf-8")).hexdigest()
+    value = int(digest, 16) % 1_000_000
+    # ~50 % of samples are eligible candidates so we always reach the target.
+    return (value / 1_000_000) < 0.5
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Preprocess dataset for IndexTTS2 fine-tuning."
@@ -148,7 +165,17 @@ def parse_args() -> argparse.Namespace:
         "--val-ratio",
         type=float,
         default=0.01,
-        help="Fraction of data reserved for validation.",
+        help="Fraction of data reserved for validation (ignored when --val-count > 0).",
+    )
+    parser.add_argument(
+        "--val-count",
+        type=int,
+        default=0,
+        help=(
+            "Fixed number of samples for the validation set. "
+            "When > 0 overrides --val-ratio. Selection is deterministic across "
+            "resume runs via SHA-1 hash of the sample ID."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -566,7 +593,13 @@ def preprocess_dataset(
             skipped += batch_skipped
             pending = pending[limit:]
             for entry in entries:
-                is_val = assign_to_validation(entry["id"], args.val_ratio)
+                val_count_target = getattr(args, "val_count", 0)
+                if val_count_target > 0:
+                    is_val = assign_to_validation_by_count(
+                        entry["id"], len(val_ids), val_count_target
+                    )
+                else:
+                    is_val = assign_to_validation(entry["id"], args.val_ratio)
                 if is_val:
                     if entry["id"] not in val_ids:
                         val_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
