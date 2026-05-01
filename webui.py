@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import sys
@@ -394,7 +395,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
                     max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
-                    diffusion_steps = gr.Slider(label=i18n("扩散采样步数"), value=16, minimum=1, maximum=25, step=1, info=i18n("S2Mel流匹配步数，越少越快，建议10~20，最高25"), key="diffusion_steps")
+                    diffusion_steps = gr.Slider(label=i18n("扩散采样步数"), value=25, minimum=1, maximum=25, step=1, info=i18n("S2Mel流匹配步数，越少越快，建议10~20，最高25"), key="diffusion_steps")
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
