@@ -191,7 +191,7 @@ def update_prompt_audio(audio_path):
             import librosa
             import glob
             
-            asr_base_dir = "models-asr"
+            asr_base_dir = "models_asr"
             model_dir = None
             model_file = None
             tokens_file = None
