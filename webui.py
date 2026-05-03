@@ -263,6 +263,7 @@ def update_prompt_audio(audio_path):
             stream.accept_waveform(16000, audio)
             recognizer.decode_stream(stream)
             text_result = stream.result.text
+            text_result = text_result.replace(' "<unk>" ', '，').replace(' "<unk>"', "。")
             print(f"ASR result: {text_result}")
         except Exception as e:
             print(f"ASR Error: {e}")
@@ -270,6 +271,7 @@ def update_prompt_audio(audio_path):
     if text_result:
         return update_button, gr.update(value=text_result)
     return update_button, gr.update()
+
 
 def create_warning_message(warning_text):
     return gr.HTML(
@@ -297,7 +299,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                                                 placeholder=i18n("请输入目标文本"),
                                                 info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
                 gen_button = gr.Button(i18n("生成语音"), key="gen_button", interactive=True)
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True, key="output_audio")
+            output_audio = gr.Audio(label=i18n("生成结果"), visible=True, autoplay=True, key="output_audio")
 
         experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=True, visible=False)
 
@@ -351,12 +353,14 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
 
         with gr.Row():
-            speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05, info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
+            speed_factor = gr.Slider(label=i18n("语速调节"), minimum=0.5, maximum=2.0, value=1.0, step=0.05,
+                                     info=i18n("1.0为标准语速，<1.0为放慢，>1.0为加快"))
 
         with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown(f"**{i18n('GPT2 采样设置')}** _{i18n('参数会影响音频多样性和生成速度详见')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
+                    gr.Markdown(
+                        f"**{i18n('GPT2 采样设置')}** _{i18n('参数会影响音频多样性和生成速度详见')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
                     with gr.Row():
                         do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("是否进行采样"))
                         temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.8, step=0.1)
@@ -365,9 +369,13 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
                         num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
                     with gr.Row():
-                        repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
-                        length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
-                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
+                        repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0,
+                                                       minimum=0.1, maximum=20.0, step=0.1)
+                        length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0,
+                                                   maximum=2.0, step=0.1)
+                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50,
+                                               maximum=tts.cfg.gpt.max_mel_tokens, step=10,
+                                               info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
@@ -376,7 +384,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     with gr.Row():
                         initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
                         max_text_tokens_per_segment = gr.Slider(
-                            label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
+                            label=i18n("分句最大Token数"), value=initial_value, minimum=20,
+                            maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
                     with gr.Accordion(i18n("预览分句结果"), open=False) as segments_settings:
@@ -390,7 +399,6 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 length_penalty, num_beams, repetition_penalty, max_mel_tokens,
                 # typical_sampling, typical_mass,
             ]
-
 
         # we must use `gr.Dataset` to support dynamic UI rewrites, since `gr.Examples`
         # binds tightly to UI and always restores the initial state of all components,
